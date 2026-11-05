@@ -97,7 +97,7 @@ typedef struct {
     uint8_t *rcv_buffer;                ///< Buffer to hold the receive data.
     spi_line_mode_t line_mode;          ///< SPI line mode of this transaction
     int cs_keep_active;                 ///< Keep CS active after transaction
-    int dont_dma;                       ///< Keep CS active after transaction
+    int dont_dma;                       ///< Don't use DMA for this transaction even if the DMA is enabled (data goes through the work registers)
 } spi_hal_trans_config_t;
 
 /**

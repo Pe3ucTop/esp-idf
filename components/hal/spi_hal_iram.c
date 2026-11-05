@@ -135,6 +135,13 @@ void spi_hal_prepare_data(spi_hal_context_t *hal, const spi_hal_dev_config_t *de
 {
     spi_dev_t *hw = hal->hw;
 
+    if (hal->dma_enabled && trans->dont_dma) {
+        //DMA may still be selected as data source/destination by a previous DMA transaction.
+        //Disable it so that the work registers are used for this transaction.
+        spi_ll_dma_rx_enable(hw, 0);
+        spi_ll_dma_tx_enable(hw, 0);
+    }
+
     //Fill DMA descriptors
     if (trans->rcv_buffer) {
         if (!hal->dma_enabled || trans->dont_dma) {

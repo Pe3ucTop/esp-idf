@@ -115,7 +115,7 @@ typedef struct {
 #define SPI_TRANS_MULTILINE_CMD       (1<<9)  ///< The data lines used at command phase is the same as data phase (otherwise, only one data line is used at command phase)
 #define SPI_TRANS_MODE_OCT            (1<<10) ///< Transmit/receive data in 8-bit mode
 #define SPI_TRANS_MULTILINE_ADDR      SPI_TRANS_MODE_DIOQIO_ADDR ///< The data lines used at address phase is the same as data phase (otherwise, only one data line is used at address phase)
-#define SPI_TRANS_DONT_DMA            (1<<11) ///< Do Not use DMA (even if it is configured)
+#define SPI_TRANS_DONT_DMA            (1<<11) ///< Don't use DMA for this transaction even if the bus has a DMA channel. Data goes through the work registers, so length/rxlength are limited to SOC_SPI_MAXIMUM_BUFFER_SIZE bytes and the buffers don't need to be DMA capable.
 
 /**
  * This structure describes one SPI transaction. The descriptor should not be modified until the transaction finishes.
