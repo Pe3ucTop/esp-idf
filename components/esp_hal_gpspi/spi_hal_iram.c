@@ -179,9 +179,20 @@ void spi_hal_setup_trans(spi_hal_context_t *hal, const spi_hal_dev_config_t *dev
     }
     spi_ll_set_miso_delay(hw, miso_delay_mode, miso_delay_num);
 
+    if (hal->dma_enabled && trans->dont_dma) {
+        // This transaction uses the work registers on a bus which has a DMA channel. On the chips where
+        // the data source/destination is selected by the peripheral (GDMA chips), these enable bits stay
+        // set after a previous DMA transaction, so the DMA FIFOs would be used instead of the work registers.
+        // Clear them here; the DMA transactions set them again in ``spi_hal_hw_prepare_rx/tx``.
+        // (They are no-ops on the chips which don't have these bits.)
+        spi_ll_dma_rx_enable(hw, 0);
+        spi_ll_dma_tx_enable(hw, 0);
+    }
+
 #if SPI_LL_SUPPORT_FD_TX_WAIT_DMA
     // enable tx data wait only when tx is used, otherwise rx only trans will hang on start
-    spi_ll_master_enable_fd_wait_dma_tx_data(hw, trans->send_buffer && trans->tx_bitlen);
+    // and never wait for DMA data if the data is not provided by DMA
+    spi_ll_master_enable_fd_wait_dma_tx_data(hw, !trans->dont_dma && trans->send_buffer && trans->tx_bitlen);
 #endif
     spi_ll_set_mosi_bitlen(hw, trans->tx_bitlen);
     if (dev->half_duplex) {
