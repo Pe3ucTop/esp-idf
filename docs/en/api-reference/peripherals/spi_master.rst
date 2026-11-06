@@ -378,6 +378,16 @@ Transactions with Data Not Exceeding 32 Bits
 
 When the transaction data size is equal to or less than 32 bits, it will be sub-optimal to allocate a buffer for the data. The data can be directly stored in the transaction struct instead. For transmitted data, it can be achieved by using the :cpp:member:`spi_transaction_t::tx_data` member and setting the :c:macro:`SPI_TRANS_USE_TXDATA` flag on the transmission. For received data, use :cpp:member:`spi_transaction_t::rx_data` and set :c:macro:`SPI_TRANS_USE_RXDATA`. In both cases, do not touch the :cpp:member:`spi_transaction_t::tx_buffer` or :cpp:member:`spi_transaction_t::rx_buffer` members, because they use the same memory locations as :cpp:member:`spi_transaction_t::tx_data` and :cpp:member:`spi_transaction_t::rx_data`.
 
+Transactions without DMA on a DMA-Enabled Bus
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Even if the bus is initialized with a DMA channel, a single transaction can skip DMA by setting :c:macro:`SPI_TRANS_DONT_DMA` in :cpp:member:`spi_transaction_t::flags`. Such a transaction is processed through the SPI work registers, so it avoids the DMA setup overhead, and its buffers do not have to be DMA-capable or aligned (for example, they can be located on the stack or in IRAM). This is useful for short transfers, like accessing the registers of a device, mixed with large DMA transfers on the same bus. The following limits apply:
+
+- :cpp:member:`spi_transaction_t::length` and :cpp:member:`spi_transaction_t::rxlength` must not exceed ``SOC_SPI_MAXIMUM_BUFFER_SIZE`` bytes, otherwise :c:macro:`ESP_ERR_INVALID_ARG` is returned.
+- The flag cannot be combined with :c:macro:`SPI_TRANS_DMA_USE_PSRAM` or :c:macro:`SPI_TRANS_DMA_BUFFER_ALIGN_MANUAL`.
+- The flag is not supported for segmented configuration transfer (SCT) transactions.
+- The flag has no effect if the bus is initialized without a DMA channel.
+
 
 Transactions with Integers Other than ``uint8_t``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
