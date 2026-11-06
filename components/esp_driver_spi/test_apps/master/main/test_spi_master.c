@@ -384,6 +384,77 @@ TEST_CASE("SPI Master test", "[spi]")
     TEST_ASSERT(success);
 }
 
+TEST_CASE("SPI Master SPI_TRANS_DONT_DMA on a DMA enabled bus", "[spi]")
+{
+    // The bus has a DMA channel, individual transactions alternate between DMA and the work registers (SPI_TRANS_DONT_DMA)
+    spi_device_handle_t handle = setup_spi_bus_loopback(1 * 1000 * 1000, true);
+
+    const size_t test_lens[] = {1, 4, 5, 17, SOC_SPI_MAXIMUM_BUFFER_SIZE};
+    for (int polling = 0; polling < 2; polling++) {
+        for (size_t i = 0; i < sizeof(test_lens) / sizeof(test_lens[0]); i++) {
+            for (int dont_dma = 0; dont_dma < 2; dont_dma++) {
+                // Also run DMA -> CPU -> DMA -> CPU, so that no DMA setting is left over from a previous transaction
+                for (int rep = 0; rep < 2; rep++) {
+                    // Small buffers on the stack, not necessarily DMA capable or aligned
+                    uint8_t tx_buf[SOC_SPI_MAXIMUM_BUFFER_SIZE];
+                    uint8_t rx_buf[SOC_SPI_MAXIMUM_BUFFER_SIZE];
+                    size_t len = test_lens[i];
+                    for (size_t j = 0; j < len; j++) {
+                        tx_buf[j] = (uint8_t)(0xA5 + 7 * j + 13 * i + dont_dma + rep);
+                    }
+                    memset(rx_buf, 0x55, sizeof(rx_buf));
+
+                    spi_transaction_t t = {
+                        .flags = dont_dma ? SPI_TRANS_DONT_DMA : 0,
+                        .length = len * 8,
+                        .tx_buffer = tx_buf,
+                        .rx_buffer = rx_buf,
+                    };
+                    printf("%s, len %d, %s, rep %d\n", polling ? "polling" : "queued", (int)len, dont_dma ? "SPI_TRANS_DONT_DMA" : "DMA", rep);
+                    if (polling) {
+                        TEST_ESP_OK(spi_device_polling_transmit(handle, &t));
+                    } else {
+                        TEST_ESP_OK(spi_device_transmit(handle, &t));
+                    }
+                    TEST_ASSERT_EQUAL_HEX8_ARRAY(tx_buf, rx_buf, len);
+                    // Nothing is written beyond the received length
+                    for (size_t j = len; j < sizeof(rx_buf); j++) {
+                        TEST_ASSERT_EQUAL_HEX8(0x55, rx_buf[j]);
+                    }
+                }
+            }
+        }
+    }
+
+    // The limits and incompatible flags are checked
+    size_t big_len = SOC_SPI_MAXIMUM_BUFFER_SIZE + 1;
+    uint8_t *big_buf = heap_caps_calloc(1, big_len, MALLOC_CAP_DMA);
+    TEST_ASSERT_NOT_NULL(big_buf);
+    spi_transaction_t t = {
+        .length = big_len * 8,
+        .tx_buffer = big_buf,
+        .rx_buffer = big_buf,
+    };
+    // Longer than the work registers is fine for DMA ...
+    TEST_ESP_OK(spi_device_transmit(handle, &t));
+    // ... but not without it
+    t.flags = SPI_TRANS_DONT_DMA;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, spi_device_transmit(handle, &t));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, spi_device_polling_transmit(handle, &t));
+    t.length = SOC_SPI_MAXIMUM_BUFFER_SIZE * 8;
+    t.rxlength = big_len * 8;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, spi_device_transmit(handle, &t));
+    // Incompatible with the DMA buffer flags
+    t.rxlength = 0;
+    t.flags = SPI_TRANS_DONT_DMA | SPI_TRANS_DMA_BUFFER_ALIGN_MANUAL;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, spi_device_transmit(handle, &t));
+    t.flags = SPI_TRANS_DONT_DMA | SPI_TRANS_DMA_USE_PSRAM;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, spi_device_transmit(handle, &t));
+    free(big_buf);
+
+    master_free_device_bus(handle);
+}
+
 TEST_CASE("SPI Master test, interaction of multiple devs", "[spi]")
 {
     esp_err_t ret;
