@@ -119,6 +119,7 @@ typedef struct {
 #define SPI_TRANS_DMA_BUFFER_ALIGN_MANUAL   (1<<11) ///< By default driver will automatically re-alloc dma buffer if it doesn't meet hardware alignment or dma_capable requirements, this flag is for you to disable this feature, you will need to take care of the alignment otherwise driver will return you error ESP_ERR_INVALID_ARG
 #define SPI_TRANS_DMA_USE_PSRAM       (1<<12) ///< Use PSRAM for DMA buffer directly, has speed limit, but no temp buffer and save memory
 #define SPI_TRANS_DDRCLK              (1<<13) ///< Use DDRCLK (double clock edge) for current transaction.
+#define SPI_TRANS_DONT_DMA            (1<<14) ///< Do not use DMA for this transaction even if the bus was initialized with a DMA channel. The data goes through the SPI work registers, so ``length`` and ``rxlength`` are limited to ``SOC_SPI_MAXIMUM_BUFFER_SIZE`` bytes, and the buffers don't have to be DMA-capable or aligned (e.g. they may be on the stack or in IRAM). Can't be combined with ``SPI_TRANS_DMA_USE_PSRAM`` or ``SPI_TRANS_DMA_BUFFER_ALIGN_MANUAL``, and is not supported for segmented (SCT) transactions. Has no effect if the bus has no DMA channel.
 
 // Output flags
 #define SPI_TRANS_DMA_RX_FAIL         (1<<30) ///< RX transaction data lose flag, indicate DMA RX overflow

@@ -759,6 +759,18 @@ static void SPI_MASTER_ISR_ATTR spi_bus_intr_disable(void *host)
     (void)esp_intr_disable(((spi_host_t *)host)->intr);
 }
 
+/**
+ * @brief Whether the given transaction is processed by DMA.
+ *
+ * The bus has to be initialized with a DMA channel, and the transaction must not request SPI_TRANS_DONT_DMA.
+ * This is a per-transaction decision; use ``bus_attr->dma_enabled`` directly only for per-bus things.
+ * Not for segmented (SCT) transactions, which always use DMA.
+ */
+static inline SPI_MASTER_ISR_ATTR bool spi_trans_use_dma(const spi_bus_attr_t *bus_attr, const spi_transaction_t *trans)
+{
+    return bus_attr->dma_enabled && !(trans->flags & SPI_TRANS_DONT_DMA);
+}
+
 #if SOC_GDMA_SUPPORTED  // AHB_DMA_V1 and AXI_DMA
 // dma is provided by gdma driver on these targets
 #define spi_dma_reset               gdma_reset
@@ -819,6 +831,7 @@ static void SPI_MASTER_ISR_ATTR spi_format_hal_trans_struct(spi_device_t *dev, s
     }
 
     hal_trans->cs_keep_active = (trans->flags & SPI_TRANS_CS_KEEP_ACTIVE) ? 1 : 0;
+    hal_trans->dont_dma = (trans->flags & SPI_TRANS_DONT_DMA) ? 1 : 0;
     //Set up OIO/QIO/DIO if needed
     hal_trans->line_mode.data_lines = (trans->flags & SPI_TRANS_MODE_DIO) ? 2 : (trans->flags & SPI_TRANS_MODE_QIO) ? 4 : 1;
 #if SOC_SPI_SUPPORT_OCT
@@ -850,10 +863,10 @@ static void SPI_MASTER_ISR_ATTR spi_new_trans(spi_device_t *dev, spi_trans_priv_
     spi_format_hal_trans_struct(dev, trans_buf, &hal_trans);
     spi_hal_setup_trans(hal, hal_dev, &hal_trans);
 
-    if (host->bus_attr->dma_enabled) {
+    if (spi_trans_use_dma(host->bus_attr, trans)) {
         s_spi_dma_prepare_data(host, hal, hal_dev, &hal_trans);
     } else {
-        //Need to copy data to registers manually
+        //Need to copy data to registers manually (no DMA on the bus, or SPI_TRANS_DONT_DMA is set)
         spi_hal_push_tx_buffer(hal, &hal_trans);
     }
     //these registers should be configured after the DMA is set
@@ -866,7 +879,7 @@ static void SPI_MASTER_ISR_ATTR spi_new_trans(spi_device_t *dev, spi_trans_priv_
 #if CONFIG_SPIRAM && SOC_PSRAM_DMA_CAPABLE
     spi_hal_clear_intr_mask(hal, SPI_LL_INTR_IN_FULL | SPI_LL_INTR_OUT_EMPTY);
 #if !SPI_LL_SUPPORT_FD_TX_WAIT_DMA
-    if (esp_ptr_dma_ext_capable(hal_trans.send_buffer)) {
+    if (!hal_trans.dont_dma && esp_ptr_dma_ext_capable(hal_trans.send_buffer)) {
         // ! Delay here is required for EDMA to pass data from PSRAM to GPSPI
         esp_rom_delay_us(SPI_EDMA_SETUP_TIME_US(hal_dev->timing_conf.real_freq));
     }
@@ -882,7 +895,7 @@ static void SPI_MASTER_ISR_ATTR spi_post_trans(spi_host_t *host)
 {
     spi_transaction_t *cur_trans = host->cur_trans_buf.trans;
 
-    if (!host->bus_attr->dma_enabled) {
+    if (!spi_trans_use_dma(host->bus_attr, cur_trans)) {
         spi_hal_fetch_result(&host->hal);
     }
     //Call post-transaction callback, if any
@@ -1019,7 +1032,15 @@ static void SPI_MASTER_ISR_ATTR spi_intr(void *arg)
         const int cs = host->cur_cs;
         //Tell common code DMA workaround that our DMA channel is idle. If needed, the code will do a DMA reset.
 
-        if (bus_attr->dma_enabled) {
+        // Segmented transactions always use DMA, otherwise check the flags of the transaction that just finished
+        bool trans_use_dma = bus_attr->dma_enabled;
+#ifdef SPI_LL_PERIPH_HAS_SCT
+        if (!host->sct_mode_enabled)
+#endif
+        {
+            trans_use_dma = spi_trans_use_dma(bus_attr, host->cur_trans_buf.trans);
+        }
+        if (trans_use_dma) {
 #if CONFIG_IDF_TARGET_ESP32
             //This workaround is only for esp32, where tx_dma_chan and rx_dma_chan are always same
             spicommon_dmaworkaround_idle(dma_ctx->tx_dma_chan.chan_id);
@@ -1104,7 +1125,7 @@ static void SPI_MASTER_ISR_ATTR spi_intr(void *arg)
             {
                 spi_trans_priv_t *const cur_trans_buf = &host->cur_trans_buf;
 #if CONFIG_IDF_TARGET_ESP32
-                if (bus_attr->dma_enabled && (cur_trans_buf->buffer_to_rcv || cur_trans_buf->buffer_to_send)) {
+                if (spi_trans_use_dma(bus_attr, cur_trans_buf->trans) && (cur_trans_buf->buffer_to_rcv || cur_trans_buf->buffer_to_send)) {
                     //mark channel as active, so that the DMA will not be reset by the slave
                     //This workaround is only for esp32, where tx_dma_chan and rx_dma_chan are always same
                     spicommon_dmaworkaround_transfer_active(dma_ctx->tx_dma_chan.chan_id);
@@ -1136,10 +1157,14 @@ static SPI_MASTER_ISR_ATTR esp_err_t check_trans_valid(spi_device_handle_t handl
     bool dummy_enabled = (((trans_desc->flags & SPI_TRANS_VARIABLE_DUMMY) ? t_ext->dummy_bits : handle->cfg.dummy_bits) != 0);
     bool extra_dummy_enabled = handle->hal_dev.timing_conf.timing_dummy;
     bool is_half_duplex = ((handle->cfg.flags & SPI_DEVICE_HALFDUPLEX) != 0);
+    bool use_dma = spi_trans_use_dma(bus_attr, trans_desc);
 
     //check transmission length
     SPI_CHECK((trans_desc->flags & SPI_TRANS_USE_RXDATA) == 0 || trans_desc->rxlength <= 32, "SPI_TRANS_USE_RXDATA only available for rxdata transfer <= 32 bits", ESP_ERR_INVALID_ARG);
     SPI_CHECK((trans_desc->flags & SPI_TRANS_USE_TXDATA) == 0 || trans_desc->length <= 32, "SPI_TRANS_USE_TXDATA only available for txdata transfer <= 32 bits", ESP_ERR_INVALID_ARG);
+    //SPI_TRANS_DONT_DMA goes through the work registers, which are limited in size and can't use PSRAM DMA or manual DMA buffer alignment
+    SPI_CHECK(!(trans_desc->flags & SPI_TRANS_DONT_DMA) || (trans_desc->length <= SOC_SPI_MAXIMUM_BUFFER_SIZE * 8 && trans_desc->rxlength <= SOC_SPI_MAXIMUM_BUFFER_SIZE * 8), "SPI_TRANS_DONT_DMA transfer > SOC_SPI_MAXIMUM_BUFFER_SIZE bytes", ESP_ERR_INVALID_ARG);
+    SPI_CHECK(!(trans_desc->flags & SPI_TRANS_DONT_DMA) || !(trans_desc->flags & (SPI_TRANS_DMA_USE_PSRAM | SPI_TRANS_DMA_BUFFER_ALIGN_MANUAL)), "SPI_TRANS_DONT_DMA is incompatible with SPI_TRANS_DMA_USE_PSRAM and SPI_TRANS_DMA_BUFFER_ALIGN_MANUAL", ESP_ERR_INVALID_ARG);
     SPI_CHECK(trans_desc->length <= bus_attr->max_transfer_sz * 8, "txdata transfer > host maximum", ESP_ERR_INVALID_ARG);
     SPI_CHECK(trans_desc->rxlength <= bus_attr->max_transfer_sz * 8, "rxdata transfer > host maximum", ESP_ERR_INVALID_ARG);
     SPI_CHECK(is_half_duplex || trans_desc->rxlength <= trans_desc->length, "rx length > tx length in full duplex mode", ESP_ERR_INVALID_ARG);
@@ -1155,8 +1180,8 @@ static SPI_MASTER_ISR_ATTR esp_err_t check_trans_valid(spi_device_handle_t handl
     SPI_CHECK(!((trans_desc->flags & (SPI_TRANS_MODE_DIO | SPI_TRANS_MODE_QIO)) && (handle->cfg.flags & SPI_DEVICE_3WIRE)), "Incompatible when setting to both multi-line mode and 3-wire-mode", ESP_ERR_INVALID_ARG);
     SPI_CHECK(!((trans_desc->flags & (SPI_TRANS_MODE_DIO | SPI_TRANS_MODE_QIO)) && !is_half_duplex), "Incompatible when setting to both multi-line mode and half duplex mode", ESP_ERR_INVALID_ARG);
 #ifdef CONFIG_IDF_TARGET_ESP32
-    SPI_CHECK(!is_half_duplex || !bus_attr->dma_enabled || !rx_enabled || !tx_enabled, "SPI half duplex mode does not support using DMA with both MOSI and MISO phases.", ESP_ERR_INVALID_ARG);
-    SPI_CHECK(!bus_attr->dma_enabled || !rxlen_extra, "rx unaligned byte with DMA is not supported", ESP_ERR_NOT_SUPPORTED);
+    SPI_CHECK(!is_half_duplex || !use_dma || !rx_enabled || !tx_enabled, "SPI half duplex mode does not support using DMA with both MOSI and MISO phases.", ESP_ERR_INVALID_ARG);
+    SPI_CHECK(!use_dma || !rxlen_extra, "rx unaligned byte with DMA is not supported", ESP_ERR_NOT_SUPPORTED);
 #endif
 #if !SOC_SPI_HD_BOTH_INOUT_SUPPORTED
     //On these chips, HW doesn't support using both TX and RX phases when in halfduplex mode
@@ -1178,7 +1203,7 @@ static SPI_MASTER_ISR_ATTR esp_err_t check_trans_valid(spi_device_handle_t handl
 
     SPI_CHECK(!txlen_extra || (txlen_extra >= SPI_LL_TX_MINI_EXTRA_BITS), "tx %d-bit is not supported on this(or this version) chip", ESP_ERR_NOT_SUPPORTED, trans_desc->length);
     SPI_CHECK(!rxlen_extra || (rxlen_extra >= SPI_LL_RX_MINI_EXTRA_BITS), "rx %d-bit is not supported on this chip", ESP_ERR_NOT_SUPPORTED, trans_desc->rxlength);
-    if (bus_attr->dma_enabled) {
+    if (use_dma) {
         SPI_CHECK(trans_desc->length <= SPI_LL_DMA_MAX_BIT_LEN, "txdata transfer > hardware max supported len", ESP_ERR_INVALID_ARG);
         SPI_CHECK(trans_desc->rxlength <= SPI_LL_DMA_MAX_BIT_LEN, "rxdata transfer > hardware max supported len", ESP_ERR_INVALID_ARG);
     } else {
@@ -1215,7 +1240,7 @@ static SPI_MASTER_ISR_ATTR esp_err_t setup_priv_desc(spi_host_t *host, spi_trans
     uint32_t* rcv_ptr = (trans_desc->flags & SPI_TRANS_USE_RXDATA) ? (uint32_t *)trans_desc->rx_data : (uint32_t *)trans_desc->rx_buffer;
     // tx memory assign
     uint32_t *send_ptr = (trans_desc->flags & SPI_TRANS_USE_TXDATA) ? (uint32_t *)trans_desc->tx_data : (uint32_t *)trans_desc->tx_buffer;
-    if (!bus_attr->dma_enabled) {
+    if (!spi_trans_use_dma(bus_attr, trans_desc)) {
         priv_desc->buffer_to_send = send_ptr;
         priv_desc->buffer_to_rcv = rcv_ptr;
         return ESP_OK;
@@ -1460,8 +1485,10 @@ esp_err_t SPI_MASTER_ISR_ATTR spi_device_polling_end(spi_device_handle_t handle,
             return ESP_ERR_TIMEOUT;
         }
     }
-    spicommon_dma_rx_mb(host->id, host->cur_trans_buf.buffer_to_rcv);
-    spi_trans_dma_error_check(host);
+    if (spi_trans_use_dma(host->bus_attr, host->cur_trans_buf.trans)) {
+        spicommon_dma_rx_mb(host->id, host->cur_trans_buf.buffer_to_rcv);
+        spi_trans_dma_error_check(host);
+    }
     uint32_t trans_flags = host->cur_trans_buf.trans->flags;  // save the flags before bus_lock release
 
     ESP_LOGV(SPI_TAG, "polling trans done");
@@ -1820,6 +1847,7 @@ esp_err_t SPI_MASTER_ATTR spi_device_queue_multi_trans(spi_device_handle_t handl
 
     esp_err_t ret = ESP_OK;
     for (int i = 0; i < trans_num; i++) {
+        SPI_CHECK(!(seg_trans_desc[i].base.flags & SPI_TRANS_DONT_DMA), "SPI_TRANS_DONT_DMA is not supported in SCT mode", ESP_ERR_INVALID_ARG);
         ESP_RETURN_ON_ERROR(check_trans_valid(handle, (spi_transaction_t *)&seg_trans_desc[i]), SPI_TAG, "Invalid transaction");
     }
     SPI_CHECK(!spi_bus_device_is_polling(handle), "Cannot queue new transaction while previous polling transaction is not terminated.", ESP_ERR_INVALID_STATE);
